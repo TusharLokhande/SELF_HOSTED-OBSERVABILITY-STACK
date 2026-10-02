@@ -1,0 +1,188 @@
+receivers:
+
+  # ============================================================
+  # OTLP
+  #
+  # Applications send:
+  #
+  # traces
+  # metrics
+  # logs
+  #
+  # here.
+  # ============================================================
+
+  otlp:
+    protocols:
+
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+      http:
+        endpoint: 0.0.0.0:4318
+
+
+  # ============================================================
+  # Docker JSON logs
+  # ============================================================
+
+  filelog/docker:
+    include:
+      - /var/lib/docker/containers/*/*-json.log
+    start_at: end
+    include_file_name: false
+    include_file_path: true
+
+    operators:
+
+      - type: json_parser
+        parse_from: body
+
+      - type: move
+        from: body.log
+        to: body.message
+
+      - type: time_parser
+        parse_from: body.time
+        layout_type: gotime
+        layout: "2006-01-02T15:04:05.999999999Z07:00"
+
+      - type: add
+        field: attributes.source
+        value: docker
+
+
+processors:
+
+  # Add useful resource information
+  resource:
+
+    attributes:
+
+      - key: deployment.environment
+        value: self-hosted
+        action: upsert
+
+
+  # Prevent excessive memory usage
+  memory_limiter:
+
+    check_interval: 1s
+
+    limit_mib: 512
+
+    spike_limit_mib: 128
+
+
+  # Batch telemetry before exporting
+  batch:
+
+    timeout: 5s
+
+    send_batch_size: 1024
+
+
+exporters:
+
+  # ============================================================
+  # TRACES → TEMPO
+  # ============================================================
+
+  otlp/tempo:
+
+    endpoint: tempo:4317
+
+    tls:
+      insecure: true
+
+
+  # ============================================================
+  # METRICS → PROMETHEUS
+  # ============================================================
+
+  prometheus:
+
+    endpoint: "0.0.0.0:8889"
+
+
+  # ============================================================
+  # LOGS → LOKI
+  # ============================================================
+
+  otlphttp/loki:
+
+    endpoint: http://loki:3100/otlp
+
+
+  # Useful while debugging the initial setup
+  debug:
+    verbosity: basic
+
+
+extensions:
+
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+
+service:
+
+  extensions:
+    - health_check
+
+
+  pipelines:
+
+    # ==========================================================
+    # TRACES
+    # ==========================================================
+
+    traces:
+
+      receivers:
+        - otlp
+
+      processors:
+        - memory_limiter
+        - resource
+        - batch
+
+      exporters:
+        - otlp/tempo
+
+
+    # ==========================================================
+    # METRICS
+    # ==========================================================
+
+    metrics:
+
+      receivers:
+        - otlp
+
+      processors:
+        - memory_limiter
+        - resource
+        - batch
+
+      exporters:
+        - prometheus
+
+
+    # ==========================================================
+    # LOGS
+    # ==========================================================
+
+    logs:
+
+      receivers:
+        - otlp
+        - filelog/docker
+
+      processors:
+        - memory_limiter
+        - resource
+        - batch
+
+      exporters:
+        - otlphttp/loki
